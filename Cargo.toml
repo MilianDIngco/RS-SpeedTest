@@ -1,0 +1,8 @@
+[package]
+name = "proj2-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iced = { version = "0.13.1", features = ["image", "tokio"] }
+image = "0.25"

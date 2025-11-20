@@ -1,3 +1,5 @@
+use std::{net::{TcpListener, TcpStream}, os::unix::thread, time::Instant};
+
 use iced::{
     alignment, 
     widget::{button, column, container, image, row, text, text_input, toggler, Stack},
@@ -17,6 +19,7 @@ pub enum Message {
     PortChanged(String),
     ProtocolToggled(bool),
     Connect,
+    SpeedUpdated(f32, f32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +43,8 @@ pub struct NetworkConfigApp {
     port: String,
     is_tcp: bool,
     background_image: iced::widget::image::Handle,
+    upload_speed: f32,
+    download_speed: f32,
 }
 
 impl NetworkConfigApp {
@@ -52,6 +57,8 @@ impl NetworkConfigApp {
                 port: String::from("8080"),
                 is_tcp: true,
                 background_image,
+                upload_speed: 0_f32,
+                download_speed: 0_f32,
             },
             Task::none(),
         )
@@ -69,13 +76,39 @@ impl NetworkConfigApp {
                 self.is_tcp = is_tcp;
             }
             Message::Connect => {
-                let protocol = if self.is_tcp { Protocol::TCP } else { Protocol::UDP };
+                let mut protocol = Protocol::TCP;
+                if self.is_tcp {
+                    let listener = TcpListener::bind(self.ip_address).unwrap();
+                    let (mut stream, _) = listener.accept().unwrap();
+
+                    // Spawn thread to send data 
+                    thread::spawn(|| {
+                        let mut stream = TcpStream::connect(self.ip_address).expect("Could not connect");
+                        let start = Instant::now();
+
+                        // Send handshake 
+
+                        while Instant::now() - start < 5 {
+                            let 
+                        }
+
+                    });
+                    
+                    // Spawn thread to listen to data 
+                    
+                } else {
+                    protocol = Protocol::UDP;
+                }
                 println!(
                     "Connecting to {}:{} using {}",
                     self.ip_address, self.port, protocol
                 );
             }
-        }
+            Message::SpeedUpdated(upload_value, download_value) => {
+                self.upload_speed = upload_value;
+                self.download_speed = download_value;
+            }
+       }
         Task::none()
     }
 

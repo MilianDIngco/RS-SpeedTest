@@ -1,8 +1,5 @@
 use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream, UdpSocket},
-    thread,
-    time::{Duration, Instant},
+    collections::HashSet, io::{Read, Write}, net::{TcpListener, TcpStream, UdpSocket}, thread, time::{Duration, Instant}
 };
 
 fn main() {
@@ -26,8 +23,7 @@ fn main() {
 
 fn run_tcp_server() {
     // TCP listener on port 8080
-    let listener = TcpListener::bind("0.0.0.0:8080")
-        .expect("tcp bind failed");
+    let listener = TcpListener::bind("0.0.0.0:8080").expect("tcp bind failed");
 
     println!("tcp server on 8080");
 
@@ -58,8 +54,15 @@ fn handle_tcp_connection(mut stream: TcpStream) {
 
     // run correct mode
     match cmd.as_str() {
-        "DL" => handle_tcp_download(stream),
-        "UL" => handle_tcp_upload(stream),
+        "TDST" => {
+            // Send TUAH acknowledgement
+            stream.write_all(b"TDAH").unwrap();
+            handle_tcp_download(stream)
+        }
+        "TUST" => {
+            stream.write_all(b"TUAH").unwrap();
+            handle_tcp_upload(stream)
+        }
         _ => println!("unknown tcp cmd"),
     }
 }
@@ -83,18 +86,44 @@ fn handle_tcp_download(mut stream: TcpStream) {
 fn handle_tcp_upload(mut stream: TcpStream) {
     let mut buf = [0u8; 8192];
     let start = Instant::now();
-    let mut total = 0u64;
+    let mut last_updated = Instant::now();
+    let mut total_bytes = 0u64;
+    let mut average_bytes = 0u64;
 
     // read data for 5 seconds
-    while start.elapsed() < Duration::from_secs(5) {
+    loop {
         match stream.read(&mut buf) {
             Ok(0) => break, // client closed
-            Ok(n) => total += n as u64,
+            Ok(n) => {
+                total_bytes += n as u64;
+                average_bytes += n as u64;
+            }
             Err(_) => break,
+        }
+
+        // Every 0.5 seconds, send the number of bytes received
+        if last_updated.elapsed() >= Duration::from_secs_f64(0.5) {
+            let speed = average_bytes as f64 / 0.5;
+            //reset
+            average_bytes = 0;
+            last_updated = Instant::now();
+
+            stream.write_all(&speed.to_be_bytes()).unwrap();
+            stream.flush().unwrap();
         }
     }
 
-    println!("done tcp ul: {} bytes", total);
+    // When done, send -1 as speed
+    let end_sig: f64 = -1.0;
+    stream.write_all(&end_sig.to_be_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    // Send final total speed
+    let total_speed = total_bytes as f64 / start.elapsed().as_secs_f64();
+    stream.write_all(&total_speed.to_be_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    println!("done tcp ul: {} bytes", total_bytes);
 }
 
 //
@@ -103,8 +132,8 @@ fn handle_tcp_upload(mut stream: TcpStream) {
 
 fn run_udp_server() {
     // UDP socket on port 7070
-    let socket = UdpSocket::bind("0.0.0.0:7070")
-        .expect("udp bind failed");
+    let socket = UdpSocket::bind("0.0.0.0:7070").expect("udp bind failed");
+    socket.set_read_timeout(Some(Duration::from_millis(800))).expect("Client timed out");
 
     println!("udp server on 7070");
 
@@ -122,8 +151,31 @@ fn run_udp_server() {
 
         // handle mode
         match cmd.as_str() {
-            "UDP_DL" => handle_udp_download(&socket, addr),
-            "UDP_UL" => handle_udp_upload(&socket, addr),
+            "UUST" => {
+                socket.send_to(b"UUAH", addr).unwrap();
+                // wait until client sends back triple handshake
+                match socket.recv_from(&mut buf) {
+                    Ok((len, pack_addr)) if (pack_addr == addr && &buf[..len] == b"UUAA") => {
+                        println!("Starting UDP Upload test");
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("Error when handling UDP Upload: {:?}", e)
+                }
+                
+                handle_udp_upload(&socket, addr)
+            },
+            "UDST" => {
+                socket.send_to(b"UDAH", addr).unwrap();
+                // wait until client sends back triple handshake
+                match socket.recv_from(&mut buf) {
+                    Ok((len, pack_addr)) if (pack_addr == addr && &buf[..len] == b"UDAA") => {
+                        println!("Starting UDP Download test");
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("Error when handling UDP Download: {:?}", e)
+                }
+                handle_udp_download(&socket, addr)
+            },
             _ => println!("unknown udp cmd"),
         }
     }
@@ -131,7 +183,7 @@ fn run_udp_server() {
 
 // server -> client (UDP download)
 fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
-    let payload = [0u8; 1400]; // safe UDP size
+    let payload = [0u8; 1024]; // safe UDP size
     let start = Instant::now();
 
     // send packets for 5 seconds
@@ -146,12 +198,39 @@ fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
 
 // client -> server (UDP upload)
 fn handle_udp_upload(socket: &UdpSocket, addr: std::net::SocketAddr) {
-    let mut buf = [0u8; 1500];
+    let mut buf = [0u8; 1024];
     let start = Instant::now();
     let mut total = 0u64;
 
-    // receive packets for 5 seconds
-    while start.elapsed() < Duration::from_secs(5) {
+    // start one thread for receiving packets
+    // loop until we get a seq num with -1
+    let mut seen = HashSet::new();
+    let mut first_seq = -1;
+    let mut n_recv: i64 = 0;
+    let mut max_seq: i64 = 0;
+
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((len, pack_addr)) if (pack_addr == addr) => {
+                match f64::from_be_bytes(buf[..8].try_into().unwrap()) {
+                    -1.0 => {
+                        println!("UDP Upload test complete!");
+                        break;
+                    }
+                    n => {
+                        if first_seq == -1 {
+                            first_seq = n;
+                            max_seq = n;
+                        }
+
+                        if !seen.contains(&n) {
+                            
+                        }
+                    }
+                }
+            }
+            Err(_, _) => {}
+        }
         if let Ok((n, src)) = socket.recv_from(&mut buf) {
             // only count packets from this client
             if src == addr {
@@ -159,6 +238,8 @@ fn handle_udp_upload(socket: &UdpSocket, addr: std::net::SocketAddr) {
             }
         }
     }
+
+    // start another thread to send the packet drop rate
 
     println!("done udp ul from {}: {} bytes", addr, total);
 }

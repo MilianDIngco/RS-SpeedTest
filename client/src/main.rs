@@ -1,8 +1,13 @@
 use std::{
-    collections::HashSet, io::{Read, Write}, net::{SocketAddr, TcpStream, UdpSocket}, sync::{
+    collections::HashSet,
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream, UdpSocket},
+    sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
-    }, thread, time::{Duration, Instant}
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use iced::{
@@ -258,7 +263,7 @@ impl NetworkConfigApp {
                             // UDP Upload test
                             const MAX_RETRY: u32 = 10;
                             let mut retry: u32 = 0;
-                            
+
                             // Create UdpSocket
                             let upload_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
                             upload_socket
@@ -277,7 +282,9 @@ impl NetworkConfigApp {
                                         // matches the expected handshake message
                                         if addr == server_addr && &buf[..len] == b"UUAH" {
                                             // Send final ack "UUAA"
-                                            upload_socket.send_to(b"UUAA", server_addr.clone()).unwrap();
+                                            upload_socket
+                                                .send_to(b"UUAA", server_addr.clone())
+                                                .unwrap();
                                             println!("UDP Upload test handshake complete");
                                             break;
                                         }
@@ -335,6 +342,12 @@ impl NetworkConfigApp {
                                         std::thread::sleep(sleep_amt);
                                     }
                                 }
+
+                                // Send final packet w -1
+                                let mut packet = [0u8; 1024];
+                                let end: i64 = -1;
+                                packet[..8].copy_from_slice(&end.to_be_bytes());
+                                upload_socket_send.send_to(&packet, send_server_addr).ok();
                             });
 
                             // Spawn UDP listener thread (listens to server's packet loss rate)
@@ -350,15 +363,16 @@ impl NetworkConfigApp {
                                         // checks that it comes from the right address and that the
                                         // length of the packet is correct for an f64
                                         // UDP Upload on the server side should send a packet
-                                        // with this form 
+                                        // with this form
                                         // {
-                                        // f64: ratio 
+                                        // f64: ratio
                                         // u64: n_recv
                                         // }
                                         // then we can print out the speed in this thread
-                                        Ok((len, addr)) if (addr == recv_server_addr && len == 16) => {
-                                            match f64::from_be_bytes(buf[..8].try_into().unwrap())
-                                            {
+                                        Ok((len, addr))
+                                            if (addr == recv_server_addr && len == 16) =>
+                                        {
+                                            match f64::from_be_bytes(buf[..8].try_into().unwrap()) {
                                                 -1.0 => {
                                                     // Server sends -1 to indicate test
                                                     // complete
@@ -377,14 +391,15 @@ impl NetworkConfigApp {
                                             }
 
                                             // Update rate
-                                            r_recv.store(curr_rate.round() as u64, Ordering::SeqCst);
-                                            // Print speed 
-                                            let n_recv = u64::from_be_bytes(buf[8..16].try_into().unwrap());
+                                            r_recv
+                                                .store(curr_rate.round() as u64, Ordering::SeqCst);
+                                            // Print speed
+                                            let n_recv =
+                                                u64::from_be_bytes(buf[8..16].try_into().unwrap());
                                             let speed = n_recv as f64 / 0.5;
                                             println!("Current speed: {:.2}", speed);
                                         }
-                                        Ok((_, _)) => {
-                                        }
+                                        Ok((_, _)) => {}
                                         Err(ref e)
                                             if e.kind() == std::io::ErrorKind::WouldBlock =>
                                         {
@@ -404,10 +419,11 @@ impl NetworkConfigApp {
 
                         println!("UDP Upload test is finished\nStarting UDP Download test");
 
-                        { // UDP Download test block
+                        {
+                            // UDP Download test block
                             const MAX_RETRY: u32 = 10;
                             let mut retry: u32 = 0;
-                            
+
                             // Create UdpSocket
                             let download_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
                             download_socket
@@ -417,7 +433,9 @@ impl NetworkConfigApp {
                             let server_addr: SocketAddr = ip.clone();
                             // Send UUST
                             while retry < MAX_RETRY {
-                                download_socket.send_to(b"UDST", server_addr.clone()).unwrap();
+                                download_socket
+                                    .send_to(b"UDST", server_addr.clone())
+                                    .unwrap();
 
                                 let mut buf = [0u8; 4];
                                 match download_socket.recv_from(&mut buf) {
@@ -426,7 +444,9 @@ impl NetworkConfigApp {
                                         // matches the expected handshake message
                                         if addr == server_addr && &buf[..len] == b"UDAH" {
                                             // send final triple ack UDAA
-                                            upload_socket.send_to(b"UDAA", server_addr.clone()).unwrap();
+                                            download_socket
+                                                .send_to(b"UDAA", server_addr.clone())
+                                                .unwrap();
                                             println!("UDP Download test handshake complete");
                                             break;
                                         }
@@ -436,11 +456,13 @@ impl NetworkConfigApp {
                                         println!("No response, retrying..");
                                         continue;
                                     }
-                                    Err(e) => panic!("Error during TCP Download handshake: {:?}", e),
+                                    Err(e) => {
+                                        panic!("Error during TCP Download handshake: {:?}", e)
+                                    }
                                 }
                             }
 
-                            let rate = Arc::new(AtomicU64::new(100_00)); // %100.00 loss rate 
+                            let rate = Arc::new(AtomicU64::new(100_00)); // %100.00 loss rate
 
                             // Spawn UDP listener thread (listens to server's packet loss rate)
                             let r_recv = rate.clone();
@@ -453,6 +475,7 @@ impl NetworkConfigApp {
                                 let mut n_recv: i64 = 0;
                                 let mut max_seq: i64 = 0;
                                 let start = Instant::now();
+                                let mut last_updated = Instant::now();
 
                                 loop {
                                     match download_socket_recv.recv_from(&mut buf) {
@@ -461,7 +484,8 @@ impl NetworkConfigApp {
                                         Ok((len, addr)) if (addr == recv_server_addr) => {
                                             // Parse packet, grab sequence number, grab
                                             // packet contents
-                                            let seq_num = i64::from_be_bytes(buf[..8].try_into().unwrap());
+                                            let seq_num =
+                                                i64::from_be_bytes(buf[..8].try_into().unwrap());
                                             if seq_num == -1 {
                                                 println!("UDP Download test DONEEEE");
                                                 break;
@@ -482,14 +506,20 @@ impl NetworkConfigApp {
                                             // Update r_recv ratio so the sender can send it
                                             let expected = max_seq - first_seq + 1;
                                             let n_lost = expected - n_recv;
-                                            let drop_ratio:u64 = ((n_lost as f64 / n_recv as f64) * 100_00.0).round() as u64;
+                                            let drop_ratio: u64 =
+                                                ((n_lost as f64 / expected as f64) * 100_00.0)
+                                                    .round()
+                                                    as u64;
                                             r_recv.store(drop_ratio, Ordering::SeqCst);
                                             // Print out the current speed
-                                            let speed = (n_recv as f64 * len as f64) / start.elapsed().as_secs_f64();
-                                            println!("Current speed: {:.2}", speed);
+                                            if last_updated.elapsed() > Duration::from_millis(500) {
+                                                let speed = (n_recv as f64 * len as f64)
+                                                    / start.elapsed().as_secs_f64();
+                                                println!("Current speed: {:.2}", speed);
+                                                last_updated = Instant::now();
+                                            }
                                         }
-                                        Ok((_, _)) => {
-                                        }
+                                        Ok((_, _)) => {}
                                         Err(ref e)
                                             if e.kind() == std::io::ErrorKind::WouldBlock =>
                                         {
@@ -509,20 +539,21 @@ impl NetworkConfigApp {
                             let send_server_addr = server_addr.clone();
                             let download_socket_send = download_socket;
                             let udp_download_send = thread::spawn(move || {
-
                                 let start = Instant::now();
                                 let interval = Duration::from_millis(200);
 
                                 while start.elapsed()
                                     < Duration::from_secs_f32(download_test_duration)
                                 {
-                                    // Every 0.2 seconds, send the current rate 
+                                    // Every 0.2 seconds, send the current rate
                                     let last_sent = Instant::now();
                                     // update interval
                                     let rate = r_send.load(Ordering::SeqCst);
 
                                     // send packet
-                                    download_socket_send.send_to(&rate.to_be_bytes(), send_server_addr).ok();
+                                    download_socket_send
+                                        .send_to(&rate.to_be_bytes(), send_server_addr)
+                                        .ok();
 
                                     // check how much time elapsed, if < interval, sleep
                                     if last_sent.elapsed() < interval {
@@ -530,12 +561,18 @@ impl NetworkConfigApp {
                                         std::thread::sleep(sleep_amt);
                                     }
                                 }
+                                
+                                // when finished, send -1 rate
+                                let rate: i64 = -1;
+                                download_socket_send
+                                    .send_to(&rate.to_be_bytes(), send_server_addr)
+                                    .ok();
                             });
 
                             udp_download_send.join().unwrap();
                             udp_download_recv.join().unwrap();
-                            
                         } // UDP Download test block
+                        is_running_clone.store(false, Ordering::SeqCst);
                     });
                 }
                 println!(

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet, io::{Read, Write}, net::{TcpListener, TcpStream, UdpSocket}, thread, time::{Duration, Instant}
+    collections::HashSet, io::{Read, Write}, net::{TcpListener, TcpStream, UdpSocket}, sync::{atomic::{AtomicU64, Ordering}, Arc}, thread, time::{Duration, Instant}
 };
 
 fn main() {
@@ -133,7 +133,9 @@ fn handle_tcp_upload(mut stream: TcpStream) {
 fn run_udp_server() {
     // UDP socket on port 7070
     let socket = UdpSocket::bind("0.0.0.0:7070").expect("udp bind failed");
-    socket.set_read_timeout(Some(Duration::from_millis(800))).expect("Client timed out");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(800)))
+        .expect("Client timed out");
 
     println!("udp server on 7070");
 
@@ -159,11 +161,11 @@ fn run_udp_server() {
                         println!("Starting UDP Upload test");
                     }
                     Ok(_) => {}
-                    Err(e) => println!("Error when handling UDP Upload: {:?}", e)
+                    Err(e) => println!("Error when handling UDP Upload: {:?}", e),
                 }
-                
+
                 handle_udp_upload(&socket, addr)
-            },
+            }
             "UDST" => {
                 socket.send_to(b"UDAH", addr).unwrap();
                 // wait until client sends back triple handshake
@@ -172,10 +174,10 @@ fn run_udp_server() {
                         println!("Starting UDP Download test");
                     }
                     Ok(_) => {}
-                    Err(e) => println!("Error when handling UDP Download: {:?}", e)
+                    Err(e) => println!("Error when handling UDP Download: {:?}", e),
                 }
                 handle_udp_download(&socket, addr)
-            },
+            }
             _ => println!("unknown udp cmd"),
         }
     }
@@ -183,23 +185,93 @@ fn run_udp_server() {
 
 // server -> client (UDP download)
 fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
-    let payload = [0u8; 1024]; // safe UDP size
-    let start = Instant::now();
+    // Shared send rate (packets/sec)
+    let test_duration: f32 = 5.0;
+    let rate = Arc::new(AtomicU64::new(100_00)); 
 
-    // send packets for 5 seconds
-    while start.elapsed() < Duration::from_secs(5) {
-        if socket.send_to(&payload, addr).is_err() {
-            break;
+    let r_recv = rate.clone();
+    let socket_recv = socket.try_clone().unwrap();
+    socket_recv.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let client_addr = addr.clone();
+    let listener_thread = thread::spawn(move || {
+        let mut buf = [0u8; 8]; 
+        loop {
+            match socket_recv.recv_from(&mut buf) {
+                Ok((len, src)) if src == client_addr && len == 16 => {
+                    let drop_ratio = f64::from_be_bytes(buf[..8].try_into().unwrap());
+                    if drop_ratio < 0.0 {
+                        // Client signals test complete
+                        println!("UDP Download test complete (client finished)");
+                        break;
+                    }
+
+                    // Simple dynamic rate adjustment
+                    let mut curr_rate = r_recv.load(Ordering::SeqCst) as f64;
+                    if drop_ratio > 0.05 * 10_000.0 {
+                        curr_rate *= 0.8; // decrease rate by 20%
+                    } else {
+                        curr_rate *= 1.1; // increase rate by 10%
+                    }
+
+                    r_recv.store(curr_rate.round() as u64, Ordering::SeqCst);
+
+                    let n_recv = u64::from_be_bytes(buf[8..16].try_into().unwrap());
+                    println!(
+                        "Client received {} packets, drop ratio {:.2}%",
+                        n_recv,
+                        drop_ratio / 100.0
+                    );
+                }
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("Error receiving from client: {:?}", e),
+            }
         }
-    }
+    });
 
-    println!("done udp dl to {}", addr);
+    let r_send = rate.clone();
+    let socket_send = socket.try_clone().unwrap();
+    let client_addr_send = addr.clone();
+    let sender_thread = thread::spawn(move || {
+        let start = Instant::now();
+        let mut seq: i64 = 0;
+
+        while start.elapsed() < Duration::from_secs_f32(test_duration) {
+            let last_sent = Instant::now();
+            let curr_rate = r_send.load(Ordering::SeqCst);
+            let interval = if curr_rate > 0 {
+                Duration::from_micros(1_000_000 / curr_rate)
+            } else {
+                Duration::from_micros(1_000_000) // default 1 packet/sec
+            };
+
+            // Build packet: {i64 seq_num, [0u8; 1016]}
+            let mut packet = [0u8; 1024];
+            packet[..8].copy_from_slice(&seq.to_be_bytes());
+            seq += 1;
+
+            socket_send.send_to(&packet, client_addr_send).ok();
+
+            if last_sent.elapsed() < interval {
+                std::thread::sleep(interval - last_sent.elapsed());
+            }
+        }
+
+        let mut packet = [0u8; 1024];
+        packet[..8].copy_from_slice(&(-1i64).to_be_bytes());
+        socket_send.send_to(&packet, client_addr_send).ok();
+    });
+
+    sender_thread.join().unwrap();
+    listener_thread.join().unwrap();
+
+    println!("UDP Download test completed for client {}", addr);
 }
 
 // client -> server (UDP upload)
 fn handle_udp_upload(socket: &UdpSocket, addr: std::net::SocketAddr) {
     let mut buf = [0u8; 1024];
-    let start = Instant::now();
+    let mut last_updated = Instant::now();
     let mut total = 0u64;
 
     // start one thread for receiving packets
@@ -212,34 +284,64 @@ fn handle_udp_upload(socket: &UdpSocket, addr: std::net::SocketAddr) {
     loop {
         match socket.recv_from(&mut buf) {
             Ok((len, pack_addr)) if (pack_addr == addr) => {
-                match f64::from_be_bytes(buf[..8].try_into().unwrap()) {
-                    -1.0 => {
+                match i64::from_be_bytes(buf[..8].try_into().unwrap()) {
+                    -1 => {
                         println!("UDP Upload test complete!");
+                        // create buf
+                        let end: f64 = -1.0;
+                        let payload: u64 = 1;
+                        let end_bytes = end.to_be_bytes();
+                        let payload_bytes = payload.to_be_bytes();
+                        let mut packet = Vec::with_capacity(end_bytes.len() + payload_bytes.len());
+                        packet.extend_from_slice(&end_bytes);
+                        packet.extend_from_slice(&payload_bytes);
+                        socket.send_to(&packet, addr).unwrap();
                         break;
                     }
                     n => {
                         if first_seq == -1 {
                             first_seq = n;
                             max_seq = n;
+                            total += 1;
                         }
 
                         if !seen.contains(&n) {
-                            
+                            seen.insert(n);
+                            n_recv += 1;
+                            total += 1;
+                        }
+                        if n > max_seq {
+                            max_seq = n;
+                        }
+
+                        // Update ratio then send to the client
+                        let expected = max_seq - first_seq + 1;
+                        let n_lost = expected - n_recv;
+                        let drop_ratio: u64 =
+                            ((n_lost as f64 / expected as f64) * 100_00.0).round() as u64;
+                        // Print out the current speed
+                        let speed =
+                            (n_recv as f64 * len as f64) / last_updated.elapsed().as_secs_f64();
+
+                        let ratio_bytes = drop_ratio.to_be_bytes();
+                        let speed_bytes = speed.to_be_bytes();
+
+                        // create buf
+                        if last_updated.elapsed() >= Duration::from_millis(500) {
+                            let mut packet =
+                                Vec::with_capacity(ratio_bytes.len() + speed_bytes.len());
+                            packet.extend_from_slice(&ratio_bytes);
+                            packet.extend_from_slice(&speed_bytes);
+                            socket.send_to(&packet, addr).unwrap();
+                            last_updated = Instant::now();
                         }
                     }
                 }
             }
-            Err(_, _) => {}
-        }
-        if let Ok((n, src)) = socket.recv_from(&mut buf) {
-            // only count packets from this client
-            if src == addr {
-                total += n as u64;
-            }
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
-
-    // start another thread to send the packet drop rate
 
     println!("done udp ul from {}: {} bytes", addr, total);
 }

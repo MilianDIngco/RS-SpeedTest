@@ -162,11 +162,11 @@ impl NetworkConfigApp {
                                         // get final total speed
                                         recv_stream.read_exact(&mut buf).unwrap();
                                         let total_speed = f64::from_be_bytes(buf);
-                                        println!("Final TCP Upload speed: {:.2}", total_speed);
+                                        println!("Final TCP Upload speed: {:.2} B/s", total_speed);
                                         break;
                                     }
 
-                                    println!("Current speed: {}", speed);
+                                    println!("Current speed: {} B/s", speed);
                                 }
                             });
 
@@ -225,7 +225,6 @@ impl NetworkConfigApp {
                                             let total_speed =
                                                 total_bytes as f64 / start.elapsed().as_secs_f64();
                                             let speed = average_bytes as f64 / update_interval_secs; // bytes per sec;
-                                            println!("Average speed: {:.2} B/s", total_speed);
                                             println!("Current speed: {:.2} B/s", speed);
                                             average_bytes = 0;
                                             last_updated = Instant::now();
@@ -397,7 +396,7 @@ impl NetworkConfigApp {
                                             let n_recv =
                                                 u64::from_be_bytes(buf[8..16].try_into().unwrap());
                                             let speed = n_recv as f64 / 0.5;
-                                            println!("Current speed: {:.2}", speed);
+                                            println!("Current speed: {:.2} B/s", speed);
                                         }
                                         Ok((_, _)) => {}
                                         Err(ref e)
@@ -515,7 +514,7 @@ impl NetworkConfigApp {
                                             if last_updated.elapsed() > Duration::from_millis(500) {
                                                 let speed = (n_recv as f64 * len as f64)
                                                     / start.elapsed().as_secs_f64();
-                                                println!("Current speed: {:.2}", speed);
+                                                println!("Current speed: {:.2} B/s", speed);
                                                 last_updated = Instant::now();
                                             }
                                         }

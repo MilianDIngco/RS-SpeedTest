@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc,
     },
     thread,
@@ -462,7 +462,7 @@ impl NetworkConfigApp {
                                 }
                             }
 
-                            let rate = Arc::new(AtomicU64::new(100_00)); // %100.00 loss rate
+                            let rate = Arc::new(AtomicI64::new(100_00)); // %100.00 loss rate
 
                             // Spawn UDP listener thread (listens to server's packet loss rate)
                             let r_recv = rate.clone();
@@ -506,10 +506,10 @@ impl NetworkConfigApp {
                                             // Update r_recv ratio so the sender can send it
                                             let expected = max_seq - first_seq + 1;
                                             let n_lost = expected - n_recv;
-                                            let drop_ratio: u64 =
+                                            let drop_ratio: i64 =
                                                 ((n_lost as f64 / expected as f64) * 100_00.0)
                                                     .round()
-                                                    as u64;
+                                                    as i64;
                                             r_recv.store(drop_ratio, Ordering::SeqCst);
                                             // Print out the current speed
                                             if last_updated.elapsed() > Duration::from_millis(500) {

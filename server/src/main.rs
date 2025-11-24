@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet, io::{Read, Write}, net::{TcpListener, TcpStream, UdpSocket}, sync::{atomic::{AtomicU64, Ordering}, Arc}, thread, time::{Duration, Instant}
+    collections::HashSet, io::{Read, Write}, net::{TcpListener, TcpStream, UdpSocket}, sync::{atomic::{AtomicI64, AtomicU64, Ordering}, Arc}, thread, time::{Duration, Instant}
 };
 
 fn main() {
@@ -187,19 +187,18 @@ fn run_udp_server() {
 fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
     // Shared send rate (packets/sec)
     let test_duration: f32 = 5.0;
-    let rate = Arc::new(AtomicU64::new(100_00)); 
+    let rate = Arc::new(AtomicI64::new(100_00)); 
 
     let r_recv = rate.clone();
     let socket_recv = socket.try_clone().unwrap();
-    socket_recv.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
     let client_addr = addr.clone();
     let listener_thread = thread::spawn(move || {
         let mut buf = [0u8; 8]; 
         loop {
             match socket_recv.recv_from(&mut buf) {
-                Ok((len, src)) if src == client_addr && len == 16 => {
-                    let drop_ratio = f64::from_be_bytes(buf[..8].try_into().unwrap());
-                    if drop_ratio < 0.0 {
+                Ok((len, src)) if src == client_addr && len == 8 => {
+                    let drop_ratio = i64::from_be_bytes(buf[..8].try_into().unwrap());
+                    if drop_ratio < 0 {
                         // Client signals test complete
                         println!("UDP Download test complete (client finished)");
                         break;
@@ -207,20 +206,13 @@ fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
 
                     // Simple dynamic rate adjustment
                     let mut curr_rate = r_recv.load(Ordering::SeqCst) as f64;
-                    if drop_ratio > 0.05 * 10_000.0 {
+                    if drop_ratio > (0.05 * 10_000.0) as i64 {
                         curr_rate *= 0.8; // decrease rate by 20%
                     } else {
                         curr_rate *= 1.1; // increase rate by 10%
                     }
 
-                    r_recv.store(curr_rate.round() as u64, Ordering::SeqCst);
-
-                    let n_recv = u64::from_be_bytes(buf[8..16].try_into().unwrap());
-                    println!(
-                        "Client received {} packets, drop ratio {:.2}%",
-                        n_recv,
-                        drop_ratio / 100.0
-                    );
+                    r_recv.store(curr_rate.round() as i64, Ordering::SeqCst);
                 }
                 Ok(_) => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
@@ -240,7 +232,7 @@ fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
             let last_sent = Instant::now();
             let curr_rate = r_send.load(Ordering::SeqCst);
             let interval = if curr_rate > 0 {
-                Duration::from_micros(1_000_000 / curr_rate)
+                Duration::from_micros(1_000_000 / curr_rate as u64)
             } else {
                 Duration::from_micros(1_000_000) // default 1 packet/sec
             };
@@ -253,7 +245,7 @@ fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
             socket_send.send_to(&packet, client_addr_send).ok();
 
             if last_sent.elapsed() < interval {
-                std::thread::sleep(interval - last_sent.elapsed());
+                std::thread::sleep(interval.saturating_sub(last_sent.elapsed()));
             }
         }
 
@@ -263,7 +255,9 @@ fn handle_udp_download(socket: &UdpSocket, addr: std::net::SocketAddr) {
     });
 
     sender_thread.join().unwrap();
+    println!("sender joined");
     listener_thread.join().unwrap();
+    println!("listener joined");
 
     println!("UDP Download test completed for client {}", addr);
 }
